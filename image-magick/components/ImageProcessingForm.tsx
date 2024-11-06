@@ -1,6 +1,7 @@
+// components/ImageProcessingForm.tsx
 'use client';
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
 import Image from 'next/image';
 import { 
@@ -21,15 +22,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
-import { Textarea } from '@/components/ui/textarea';
-import { Switch } from '@/components/ui/switch';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import { Progress } from '@/components/ui/progress';
 import {
   Alert,
@@ -46,6 +38,14 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import { Switch } from '@/components/ui/switch';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Slider } from '@/components/ui/slider';
 import {
   Tooltip,
@@ -54,10 +54,12 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 
+// Types
 interface FileWithPreview extends File {
   preview: string;
   uploadProgress?: number;
   status?: 'uploading' | 'complete' | 'error';
+  error?: string;
   id: string;
 }
 
@@ -72,6 +74,7 @@ interface ProcessedFile {
     format: string;
   };
   notes?: string;
+  status?: 'downloaded';
 }
 
 interface ProcessingOptions {
@@ -100,11 +103,14 @@ interface FileErrorAlertProps {
   onRemove: () => void;
 }
 
+// Constants
 const ACCEPTED_TYPES = {
   'image/jpeg': ['.jpg', '.jpeg'],
   'image/png': ['.png'],
   'image/webp': ['.webp'],
 };
+
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
 const defaultProcessingOptions: ProcessingOptions = {
   inputFormat: 'JPG',
@@ -126,6 +132,7 @@ const defaultProcessingOptions: ProcessingOptions = {
   processingNotes: '',
 };
 
+// Error Alert Component
 const FileErrorAlert: React.FC<FileErrorAlertProps> = ({ filename, onRetry, onRemove }) => (
   <Alert variant="destructive" className="mt-2">
     <AlertCircle className="h-4 w-4" />
@@ -144,91 +151,171 @@ const FileErrorAlert: React.FC<FileErrorAlertProps> = ({ filename, onRetry, onRe
   </Alert>
 );
 
+// Utility Functions
 const generateUniqueId = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-export default function ImageProcess() {
+const formatFileSize = (bytes: number): string => {
+  if (bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
+};
+
+// Main Component
+const ImageProcessingForm = () => {
   const [activeTab, setActiveTab] = useState('upload');
   const [files, setFiles] = useState<FileWithPreview[]>([]);
   const [options, setOptions] = useState<ProcessingOptions>(defaultProcessingOptions);
   const [processing, setProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [error, setError] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [processedFiles, setProcessedFiles] = useState<ProcessedFile[]>([]);
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
 
-  const removeFile = (fileToRemove: FileWithPreview) => {
-    setFiles(files => files.filter(file => file !== fileToRemove));
-    URL.revokeObjectURL(fileToRemove.preview);
+  // Cleanup function for file previews
+  useEffect(() => {
+    return () => {
+      files.forEach(file => {
+        if (file.preview) {
+          URL.revokeObjectURL(file.preview);
+        }
+      });
+    };
+  }, [files]);
+
+  // Extract metadata utility
+  const extractMetadata = async (file: File) => {
+    return new Promise<{
+      width: number;
+      height: number;
+      size: number;
+      format: string;
+      lastModified: Date;
+    }>((resolve) => {
+      const img = new Image();
+      const objectUrl = URL.createObjectURL(file);
+
+      img.onload = () => {
+        URL.revokeObjectURL(objectUrl);
+        resolve({
+          width: img.width,
+          height: img.height,
+          size: file.size,
+          format: file.type.split('/')[1].toUpperCase(),
+          lastModified: new Date(file.lastModified)
+        });
+      };
+
+      img.src = objectUrl;
+    });
   };
 
-  const handleFileUpload = async (file: FileWithPreview) => {
-    const formData = new FormData();
-    formData.append('file', file);
-
+  // File upload handler
+  const handleFileUpload = async (file: FileWithPreview): Promise<void> => {
     try {
-      const response = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
-      });
+      if (!file) {
+        throw new Error('No file selected');
+      }
 
-      if (!response.ok) throw new Error('Upload failed');
+      const formData = new FormData();
+      formData.append('file', file);
 
+      // Update file status to uploading
       setFiles(current =>
         current.map(f =>
           f.id === file.id
-            ? { ...f, uploadProgress: 100, status: 'complete' }
+            ? { ...f, status: 'uploading', uploadProgress: 0 }
             : f
         )
       );
+
+      let progressInterval: NodeJS.Timeout;
+      
+      try {
+        progressInterval = setInterval(() => {
+          setFiles(current =>
+            current.map(f =>
+              f.id === file.id && f.status === 'uploading'
+                ? { 
+                    ...f, 
+                    uploadProgress: Math.min((f.uploadProgress || 0) + 10, 90)
+                  }
+                : f
+            )
+          );
+        }, 200);
+
+        const response = await fetch('/api/upload', {
+          method: 'POST',
+          body: formData,
+        });
+
+        clearInterval(progressInterval);
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Upload failed');
+        }
+
+        const data = await response.json();
+
+        if (data.success) {
+          setFiles(current =>
+            current.map(f =>
+              f.id === file.id
+                ? { 
+                    ...f, 
+                    uploadProgress: 100, 
+                    status: 'complete',
+                    preview: `/uploads/${data.filename}`
+                  }
+                : f
+            )
+          );
+          setUploadError(null);
+        } else {
+          throw new Error(data.error || 'Upload failed');
+        }
+      } catch (error) {
+        if (progressInterval) {
+          clearInterval(progressInterval);
+        }
+        throw error;
+      }
     } catch (error) {
+      console.error('Upload error:', error);
       setFiles(current =>
         current.map(f =>
           f.id === file.id
-            ? { ...f, status: 'error' }
+            ? { 
+                ...f, 
+                status: 'error',
+                error: error instanceof Error ? error.message : 'Upload failed'
+              }
             : f
         )
       );
+      setUploadError(error instanceof Error ? error.message : 'Upload failed');
       throw error;
     }
   };
 
-  const onDrop = useCallback(async (acceptedFiles: File[]) => {
-    const newFiles = acceptedFiles.map(file => ({
-      ...file,
-      preview: URL.createObjectURL(file),
-      uploadProgress: 0,
-      status: 'uploading' as const,
-      id: generateUniqueId()
-    }));
-
-    setFiles(prev => [...prev, ...newFiles]);
-
-    for (const file of newFiles) {
-      try {
-        await handleFileUpload(file);
-      } catch (error) {
-        console.error('Upload error:', error);
-      }
+  // Remove file handler
+  const removeFile = useCallback((fileToRemove: FileWithPreview) => {
+    setFiles(files => files.filter(file => file !== fileToRemove));
+    if (fileToRemove.preview) {
+      URL.revokeObjectURL(fileToRemove.preview);
     }
   }, []);
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
-    accept: ACCEPTED_TYPES,
-    maxSize: 10485760, // 10MB
-    multiple: true
-  });
-
+  // Process handler
   const handleProcess = async () => {
     setProcessing(true);
     setProgress(0);
-    setError(null);
+    setUploadError(null);
     
     try {
-      const formData = new FormData();
-      files.forEach(file => formData.append('images', file));
-      formData.append('config', JSON.stringify(options));
-
       // Simulate processing stages
       const stages = ['Preparing', 'Processing', 'Optimizing', 'Finalizing'];
       for (const stage of stages) {
@@ -236,7 +323,7 @@ export default function ImageProcess() {
         setProgress(prev => prev + 25);
       }
 
-      // Simulate API response
+      // Simulate processed files
       const mockProcessedFiles: ProcessedFile[] = files.map(file => ({
         original: file.name,
         processed: `processed_${file.name}`,
@@ -252,20 +339,47 @@ export default function ImageProcess() {
 
       setProcessedFiles(mockProcessedFiles);
       setActiveTab('results');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : 'Processing failed');
     } finally {
       setProcessing(false);
       setProgress(0);
     }
   };
 
+  // Reset filters handler
   const resetAdvancedFilters = () => {
     setOptions(prev => ({
       ...prev,
       advancedFilters: defaultProcessingOptions.advancedFilters
     }));
   };
+
+  // Dropzone configuration
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop: useCallback(async (acceptedFiles: File[]) => {
+      const newFiles = acceptedFiles.map(file => ({
+        ...file,
+        preview: URL.createObjectURL(file),
+        id: generateUniqueId(),
+        status: 'uploading' as const,
+        uploadProgress: 0
+      }));
+
+      setFiles(prev => [...prev, ...newFiles]);
+
+      for (const file of newFiles) {
+        try {
+          await handleFileUpload(file);
+        } catch (error) {
+          console.error('Upload error:', error);
+        }
+      }
+    }, []),
+    accept: ACCEPTED_TYPES,
+    maxSize: MAX_FILE_SIZE,
+    multiple: true
+  });
 
   return (
     <div className="container mx-auto p-4 max-w-6xl">
@@ -300,8 +414,10 @@ export default function ImageProcess() {
               <TabsTrigger value="results">Results</TabsTrigger>
             </TabsList>
 
+            {/* Upload Tab */}
             <TabsContent value="upload">
               <div className="space-y-6">
+                {/* Dropzone */}
                 <div
                   {...getRootProps()}
                   className={`
@@ -324,12 +440,13 @@ export default function ImageProcess() {
                         {isDragActive ? 'Drop your images here' : 'Drag & drop your images here'}
                       </p>
                       <p className="text-sm text-gray-500 mt-1">
-                        Supports: PNG, JPG, WebP up to 10MB
+                        Supports: PNG, JPG, WebP up to {formatFileSize(MAX_FILE_SIZE)}
                       </p>
                     </div>
                   </div>
                 </div>
 
+                {/* Uploaded Files List */}
                 <AnimatePresence>
                   {files.map((file) => (
                     <motion.div
@@ -346,7 +463,7 @@ export default function ImageProcess() {
                             alt={`Preview of ${file.name}`}
                             fill
                             className="object-cover"
-                            sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
+                            sizes="80px"
                           />
                         </div>
                         <div className="flex-1">
@@ -354,7 +471,7 @@ export default function ImageProcess() {
                             <div>
                               <p className="font-medium truncate">{file.name}</p>
                               <p className="text-sm text-gray-500">
-                                {(file.size / (1024 * 1024)).toFixed(2)} MB
+                                {formatFileSize(file.size)}
                               </p>
                             </div>
                             <Button
@@ -366,6 +483,8 @@ export default function ImageProcess() {
                               <X className="h-4 w-4" />
                             </Button>
                           </div>
+                          
+                          {/* Upload Progress */}
                           {file.uploadProgress !== undefined && file.uploadProgress < 100 && (
                             <div className="mt-2 space-y-1">
                               <Progress value={file.uploadProgress} className="h-1" />
@@ -374,28 +493,21 @@ export default function ImageProcess() {
                               </p>
                             </div>
                           )}
+
+                          {/* Success Status */}
                           {file.status === 'complete' && (
                             <p className="text-xs text-green-500 mt-2 flex items-center">
                               <Check className="h-3 w-3 mr-1" />
                               Ready for processing
                             </p>
                           )}
+
+                          {/* Error Status */}
                           {file.status === 'error' && (
                             <FileErrorAlert
                               filename={file.name}
                               onRetry={async () => {
-                                setFiles(current =>
-                                  current.map(f =>
-                                    f.id === file.id
-                                      ? { ...f, status: 'uploading', uploadProgress: 0 }
-                                      : f
-                                  )
-                                );
-                                try {
-                                  await handleFileUpload(file);
-                                } catch (error) {
-                                  console.error('Retry upload error:', error);
-                                }
+                                await handleFileUpload(file);
                               }}
                               onRemove={() => removeFile(file)}
                             />
@@ -406,6 +518,7 @@ export default function ImageProcess() {
                   ))}
                 </AnimatePresence>
 
+                {/* Continue Button */}
                 {files.length > 0 && (
                   <Button
                     className="w-full"
@@ -419,6 +532,7 @@ export default function ImageProcess() {
               </div>
             </TabsContent>
 
+            {/* Options Tab */}
             <TabsContent value="options">
               <div className="space-y-6">
                 {/* Basic Options */}
@@ -433,7 +547,7 @@ export default function ImageProcess() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                      <SelectItem value="PNG">PNG</SelectItem>
+                        <SelectItem value="PNG">PNG</SelectItem>
                         <SelectItem value="JPG">JPG</SelectItem>
                         <SelectItem value="WebP">WebP</SelectItem>
                       </SelectContent>
@@ -494,7 +608,7 @@ export default function ImageProcess() {
                   </div>
                 </div>
 
-                {/* Image Enhancement Options */}
+                {/* Enhancement Options */}
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
                     <Label htmlFor="colorCorrection">Color Correction</Label>
@@ -535,7 +649,7 @@ export default function ImageProcess() {
                   )}
                 </div>
 
-                {/* Advanced Filters Section */}
+                {/* Advanced Filters */}
                 <div className="space-y-4 border-t pt-4">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-2">
@@ -562,7 +676,7 @@ export default function ImageProcess() {
                   </div>
 
                   <div className="space-y-6">
-                    {/* Brightness Slider */}
+                    {/* Brightness */}
                     <div className="space-y-2">
                       <div className="flex justify-between">
                         <Label>Brightness</Label>
@@ -586,7 +700,7 @@ export default function ImageProcess() {
                       />
                     </div>
 
-                    {/* Contrast Slider */}
+                    {/* Contrast */}
                     <div className="space-y-2">
                       <div className="flex justify-between">
                         <Label>Contrast</Label>
@@ -610,7 +724,7 @@ export default function ImageProcess() {
                       />
                     </div>
 
-                    {/* Saturation Slider */}
+                    {/* Saturation */}
                     <div className="space-y-2">
                       <div className="flex justify-between">
                         <Label>Saturation</Label>
@@ -637,19 +751,20 @@ export default function ImageProcess() {
                 </div>
 
                 {/* Processing Notes */}
-                <div className="space-y-2 border-t pt-4">
+                <div className="space-y-2">
                   <Label>Processing Notes</Label>
-                  <Textarea
+                  <textarea
+                    className="w-full min-h-[100px] rounded-md border border-gray-300 p-2"
                     value={options.processingNotes}
                     onChange={(e) => setOptions(prev => ({
                       ...prev,
                       processingNotes: e.target.value
                     }))}
-                    placeholder="Add any special instructions or notes for this batch of images..."
-                    className="min-h-[100px] resize-y"
+                    placeholder="Add any special instructions or notes..."
                   />
                 </div>
 
+                {/* Action Buttons */}
                 <div className="flex space-x-4">
                   <Button
                     variant="outline"
@@ -671,6 +786,7 @@ export default function ImageProcess() {
               </div>
             </TabsContent>
 
+            {/* Results Tab */}
             <TabsContent value="results">
               <div className="space-y-6">
                 {processing ? (
@@ -740,7 +856,7 @@ export default function ImageProcess() {
                                   </TooltipProvider>
                                 </div>
                                 <div className="text-sm text-gray-500 space-y-1">
-                                  <p>Size: {(file.metadata.size / 1024).toFixed(2)} KB</p>
+                                  <p>Size: {formatFileSize(file.metadata.size)}</p>
                                   <p>Dimensions: {file.metadata.width}x{file.metadata.height}px</p>
                                   <p>Format: {file.metadata.format.toUpperCase()}</p>
                                 </div>
@@ -769,7 +885,7 @@ export default function ImageProcess() {
                         <RefreshCw className="mr-2 h-4 w-4" />
                         Process New Images
                       </Button>
-                      <Button 
+                      <Button
                         onClick={() => {
                           processedFiles.forEach(file => {
                             const link = document.createElement('a');
@@ -786,12 +902,6 @@ export default function ImageProcess() {
                       </Button>
                     </div>
                   </motion.div>
-                ) : error ? (
-                  <Alert variant="destructive">
-                    <AlertCircle className="h-4 w-4" />
-                    <AlertTitle>Error</AlertTitle>
-                    <AlertDescription>{error}</AlertDescription>
-                  </Alert>
                 ) : (
                   <div className="text-center py-12">
                     <ImageIcon className="h-12 w-12 mx-auto text-gray-400" />
@@ -804,6 +914,7 @@ export default function ImageProcess() {
         </CardContent>
       </Card>
 
+      {/* Confirmation Dialog */}
       <AlertDialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -875,174 +986,30 @@ export default function ImageProcess() {
         ))}
       </AnimatePresence>
 
-      {/* Download Success Message */}
-      <AnimatePresence>
-        {processedFiles.map((file) => (
-          file.status === 'downloaded' && (
-            <motion.div
-              key={`download-${file.processed}`}
-              initial={{ opacity: 0, y: 50 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -50 }}
-              className="fixed bottom-4 right-4 z-50"
-            >
-              <Alert className="bg-blue-50 border-blue-200">
-                <Download className="h-4 w-4 text-blue-600" />
-                <AlertTitle>Downloaded</AlertTitle>
-                <AlertDescription>
-                  {`${file.original} has been downloaded successfully`}
-                </AlertDescription>
-              </Alert>
-            </motion.div>
-          )
-        ))}
-      </AnimatePresence>
+      {/* Error Notifications */}
+      {uploadError && (
+        <motion.div
+          initial={{ opacity: 0, y: 50 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -50 }}
+          className="fixed bottom-4 right-4 z-50"
+        >
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4" />
+            <AlertTitle>Error</AlertTitle>
+            <AlertDescription>{uploadError}</AlertDescription>
+          </Alert>
+        </motion.div>
+      )}
     </div>
   );
-}
-
-// Add metadata extraction utility
-async function extractImageMetadata(file: File): Promise<{
-  width: number;
-  height: number;
-  size: number;
-  format: string;
-  created?: Date;
-  lastModified: Date;
-  location?: { latitude: number; longitude: number } | null;
-}> {
-  return new Promise((resolve) => {
-    const img = new Image();
-    const objectUrl = URL.createObjectURL(file);
-
-    img.onload = () => {
-      URL.revokeObjectURL(objectUrl);
-      
-      resolve({
-        width: img.width,
-        height: img.height,
-        size: file.size,
-        format: file.type.split('/')[1].toUpperCase(),
-        lastModified: new Date(file.lastModified),
-        location: null // Would be populated from EXIF data in a full implementation
-      });
-    };
-
-    img.src = objectUrl;
-  });
-}
-
-// Update handleFileUpload to include metadata
-const handleFileUpload = async (file: FileWithPreview) => {
-  const formData = new FormData();
-  formData.append('file', file);
-
-  try {
-    // Extract metadata before upload
-    const metadata = await extractImageMetadata(file);
-    formData.append('metadata', JSON.stringify(metadata));
-
-    const response = await fetch('/api/upload', {
-      method: 'POST',
-      body: formData,
-      // Add upload progress tracking
-      onUploadProgress: (progressEvent) => {
-        const progress = Math.round(
-          (progressEvent.loaded * 100) / (progressEvent.total ?? 100)
-        );
-        
-        setFiles(current =>
-          current.map(f =>
-            f.id === file.id
-              ? { ...f, uploadProgress: progress }
-              : f
-          )
-        );
-      }
-    });
-
-    if (!response.ok) throw new Error('Upload failed');
-
-    // Update file status and show success message
-    setFiles(current =>
-      current.map(f =>
-        f.id === file.id
-          ? { 
-              ...f, 
-              uploadProgress: 100, 
-              status: 'complete',
-              metadata: metadata // Store metadata with file
-            }
-          : f
-      )
-    );
-
-    return metadata;
-  } catch (error) {
-    setFiles(current =>
-      current.map(f =>
-        f.id === file.id
-          ? { ...f, status: 'error' }
-          : f
-      )
-    );
-    throw error;
-  }
 };
 
-// Add handler for downloading files with success message
-const handleDownload = async (file: ProcessedFile) => {
-  try {
-    const response = await fetch(file.url);
-    const blob = await response.blob();
-    const url = window.URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = file.processed;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    window.URL.revokeObjectURL(url);
-
-    // Update file status to show download success message
-    setProcessedFiles(current =>
-      current.map(f =>
-        f.processed === file.processed
-          ? { ...f, status: 'downloaded' }
-          : f
-      )
-    );
-
-    // Remove success message after 3 seconds
-    setTimeout(() => {
-      setProcessedFiles(current =>
-        current.map(f =>
-          f.processed === file.processed
-            ? { ...f, status: undefined }
-            : f
-        )
-      );
-    }, 3000);
-  } catch (error) {
-    console.error('Download failed:', error);
-    setError('Failed to download file');
-  }
+export type {
+  FileWithPreview,
+  ProcessedFile,
+  ProcessingOptions,
+  FileErrorAlertProps,
 };
 
-// Modified ProcessedFile interface to include status
-interface ProcessedFile {
-  original: string;
-  processed: string;
-  url: string;
-  metadata: {
-    size: number;
-    width: number;
-    height: number;
-    format: string;
-    created?: Date;
-    lastModified?: Date;
-    location?: { latitude: number; longitude: number } | null;
-  };
-  notes?: string;
-  status?: 'downloaded';
-}
+export default ImageProcessingForm;
