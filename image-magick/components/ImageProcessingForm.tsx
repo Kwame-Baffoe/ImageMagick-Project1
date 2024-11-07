@@ -153,9 +153,14 @@ const formatFileSize = (bytes: number): string => {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
 };
 
+const createImageElement = (): HTMLImageElement => {
+  return document.createElement('img');
+};
+
+
 const extractMetadata = async (file: File): Promise<ImageMetadata> => {
   return new Promise((resolve, reject) => {
-    const img = new Image();
+    const img = createImageElement();
     const objectUrl = URL.createObjectURL(file);
 
     img.onload = () => {
@@ -177,6 +182,7 @@ const extractMetadata = async (file: File): Promise<ImageMetadata> => {
     img.src = objectUrl;
   });
 };
+
 
 // Error Alert Component
 const FileErrorAlert: React.FC<FileErrorAlertProps> = ({ filename, onRetry, onRemove }) => (
