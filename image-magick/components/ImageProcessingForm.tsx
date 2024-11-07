@@ -13,8 +13,8 @@ import {
   RefreshCw,
   Filter,
   Settings,
-  Image as ImageIcon,
-  Info
+  ImageIcon,
+
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -56,25 +56,72 @@ import {
 import { useToast } from '@/components/ui/use-toast';
 import { cn } from '@/lib/utils';
 
-import type {
-  FileWithPreview,
-  ProcessedFile,
-  ProcessingOptions,
-  ImageMetadata,
-} from '@/types';
+// Type Definitions
+interface FileWithPreview extends File {
+  id: string;
+  preview: string;
+  status: 'uploading' | 'complete' | 'error' | 'processing';
+  uploadProgress?: number;
+  error?: string;
+  metadata?: ImageMetadata;
+}
+
+interface ProcessedFile {
+  id: string;
+  originalName: string;
+  processedName: string;
+  originalUrl: string;
+  processedUrl: string;
+  metadata: ImageMetadata;
+  processingTime: number;
+  status: 'complete' | 'error';
+  error?: string;
+}
+
+interface ProcessingOptions {
+  outputFormat: 'PNG' | 'JPG' | 'WebP';
+  quality: number;
+  resize: boolean;
+  width: number;
+  height: number;
+  maintainAspectRatio: boolean;
+  colorCorrection: boolean;
+  sharpen: boolean;
+  watermark: boolean;
+  watermarkText: string;
+  advancedFilters: {
+    brightness: number;
+    contrast: number;
+    saturation: number;
+  };
+  processingNotes: string;
+}
+
+interface ImageMetadata {
+  width: number;
+  height: number;
+  size: number;
+  format: string;
+  lastModified: Date;
+}
+
+interface FileErrorAlertProps {
+  filename: string;
+  onRetry: () => Promise<void>;
+  onRemove: () => void;
+}
 
 // Constants
 const ACCEPTED_TYPES = {
   'image/jpeg': ['.jpg', '.jpeg'],
   'image/png': ['.png'],
   'image/webp': ['.webp'],
-};
+} as const;
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_FILES = 10;
 
 const defaultProcessingOptions: ProcessingOptions = {
-  inputFormat: 'JPG',
   outputFormat: 'PNG',
   quality: 80,
   resize: false,
@@ -94,7 +141,9 @@ const defaultProcessingOptions: ProcessingOptions = {
 };
 
 // Utility Functions
-const generateUniqueId = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+const generateUniqueId = (): string => {
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+};
 
 const formatFileSize = (bytes: number): string => {
   if (bytes === 0) return '0 Bytes';
@@ -129,13 +178,7 @@ const extractMetadata = async (file: File): Promise<ImageMetadata> => {
   });
 };
 
-// File Error Alert Component
-interface FileErrorAlertProps {
-  filename: string;
-  onRetry: () => Promise<void>;
-  onRemove: () => void;
-}
-
+// Error Alert Component
 const FileErrorAlert: React.FC<FileErrorAlertProps> = ({ filename, onRetry, onRemove }) => (
   <Alert variant="destructive" className="mt-2">
     <AlertCircle className="h-4 w-4" />
@@ -143,7 +186,7 @@ const FileErrorAlert: React.FC<FileErrorAlertProps> = ({ filename, onRetry, onRe
     <AlertDescription className="flex items-center justify-between">
       <span>Failed to upload {filename}</span>
       <div className="space-x-2">
-        <Button variant="outline" size="sm" onClick={onRetry}>
+        <Button variant="outline" size="sm" onClick={() => onRetry()}>
           Retry
         </Button>
         <Button variant="outline" size="sm" onClick={onRemove}>
@@ -155,21 +198,21 @@ const FileErrorAlert: React.FC<FileErrorAlertProps> = ({ filename, onRetry, onRe
 );
 
 // Main Component
-const ImageProcessingForm = () => {
-  // State management
-  const [activeTab, setActiveTab] = useState('upload');
+const ImageProcessingForm: React.FC = () => {
+  // State Management
+  const [activeTab, setActiveTab] = useState<string>('upload');
   const [files, setFiles] = useState<FileWithPreview[]>([]);
   const [options, setOptions] = useState<ProcessingOptions>(defaultProcessingOptions);
-  const [processing, setProcessing] = useState(false);
-  const [progress, setProgress] = useState(0);
+  const [processing, setProcessing] = useState<boolean>(false);
+  const [progress, setProgress] = useState<number>(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [processedFiles, setProcessedFiles] = useState<ProcessedFile[]>([]);
-  const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+  const [showConfirmDialog, setShowConfirmDialog] = useState<boolean>(false);
   
   const { toast } = useToast();
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  // Cleanup function for file previews
+  // Cleanup Effect
   useEffect(() => {
     return () => {
       files.forEach(file => {
@@ -177,15 +220,14 @@ const ImageProcessingForm = () => {
           URL.revokeObjectURL(file.preview);
         }
       });
-      // Cleanup any ongoing requests
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
     };
   }, [files]);
 
-  // File upload handler with progress tracking
-  const handleFileUpload = async (file: FileWithPreview): Promise<void> => {
+  // File Upload Handler
+  const handleFileUpload = useCallback(async (file: FileWithPreview): Promise<void> => {
     try {
       if (!file) {
         throw new Error('No file selected');
@@ -194,119 +236,93 @@ const ImageProcessingForm = () => {
       const formData = new FormData();
       formData.append('file', file);
 
-      // Get metadata before upload
       const metadata = await extractMetadata(file);
       formData.append('metadata', JSON.stringify(metadata));
 
-      // Update file status to uploading
-      setFiles(current =>
-        current.map(f =>
+      setFiles((prevFiles) => 
+        prevFiles.map((f): FileWithPreview => 
           f.id === file.id
-            ? { ...f, status: 'uploading', uploadProgress: 0, metadata }
-            : f
-        )
-      );
-
-      // Create new AbortController for this upload
-      abortControllerRef.current = new AbortController();
-
-      const xhr = new XMLHttpRequest();
-      
-      // Track upload progress
-      xhr.upload.addEventListener('progress', (event) => {
-        if (event.lengthComputable) {
-          const progress = Math.round((event.loaded / event.total) * 100);
-          setFiles(current =>
-            current.map(f =>
-              f.id === file.id
-                ? { ...f, uploadProgress: progress }
-                : f
-            )
-          );
-        }
-      });
-
-      // Wrap XHR in a promise
-      const response = await new Promise<any>((resolve, reject) => {
-        xhr.open('POST', '/api/upload');
-        
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            try {
-              resolve(JSON.parse(xhr.responseText));
-            } catch (e) {
-              reject(new Error('Invalid response format'));
-            }
-          } else {
-            reject(new Error(xhr.statusText || 'Upload failed'));
-          }
-        };
-        
-        xhr.onerror = () => reject(new Error('Network error'));
-        xhr.onabort = () => reject(new Error('Upload cancelled'));
-        
-        xhr.send(formData);
-      });
-
-      if (response.success) {
-        setFiles(current =>
-          current.map(f =>
-            f.id === file.id
-              ? { 
-                  ...f, 
-                  uploadProgress: 100, 
-                  status: 'complete',
-                  preview: `/uploads/${response.filename}`,
-                  metadata: response.metadata || metadata
-                }
-              : f
-          )
-        );
-        
-        toast({
-          title: "Upload Successful",
-          description: `${file.name} has been uploaded successfully`,
-          duration: 3000,
-        });
-      } else {
-        throw new Error(response.error || 'Upload failed');
-      }
-
-    } catch (error) {
-      console.error('Upload error:', error);
-      setFiles(current =>
-        current.map(f =>
-          f.id === file.id
-            ? { 
-                ...f, 
-                status: 'error',
-                error: error instanceof Error ? error.message : 'Upload failed'
+            ? {
+                ...f,
+                status: 'uploading',
+                uploadProgress: 0,
+                metadata
               }
             : f
         )
       );
+
+      abortControllerRef.current = new AbortController();
+
+      const response = await fetch('/api/upload', {
+        method: 'POST',
+        body: formData,
+        signal: abortControllerRef.current.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Upload failed: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+
+      setFiles((prevFiles) =>
+        prevFiles.map((f): FileWithPreview =>
+          f.id === file.id
+            ? {
+                ...f,
+                status: 'complete',
+                uploadProgress: 100,
+                preview: data.url,
+                metadata: data.metadata || metadata
+              }
+            : f
+        )
+      );
+
+      toast({
+        title: "Upload Successful",
+        description: `${file.name} has been uploaded successfully`,
+        duration: 3000,
+      });
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Upload failed';
+      console.error('Upload error:', error);
       
+      setFiles((prevFiles) =>
+        prevFiles.map((f): FileWithPreview =>
+          f.id === file.id
+            ? {
+                ...f,
+                status: 'error',
+                error: errorMessage
+              }
+            : f
+        )
+      );
+
       toast({
         variant: "destructive",
         title: "Upload Failed",
-        description: error instanceof Error ? error.message : 'Upload failed',
+        description: errorMessage,
         duration: 5000,
       });
-      
+
       throw error;
     }
-  };
+  }, [toast]);
 
-  // Remove file handler
+  // File Removal Handler
   const removeFile = useCallback((fileToRemove: FileWithPreview) => {
-    setFiles(files => files.filter(file => file !== fileToRemove));
+    setFiles((prevFiles) => prevFiles.filter(file => file.id !== fileToRemove.id));
     if (fileToRemove.preview) {
       URL.revokeObjectURL(fileToRemove.preview);
     }
   }, []);
 
-  // Process handler
-  const handleProcess = async () => {
+  // Process Handler
+  const handleProcess = useCallback(async () => {
     setProcessing(true);
     setProgress(0);
     setUploadError(null);
@@ -319,9 +335,8 @@ const ImageProcessingForm = () => {
         const file = files[i];
         const startTime = Date.now();
 
-        // Update processing status
-        setFiles(current =>
-          current.map(f =>
+        setFiles((prevFiles) =>
+          prevFiles.map((f): FileWithPreview =>
             f.id === file.id
               ? { ...f, status: 'processing' }
               : f
@@ -329,10 +344,7 @@ const ImageProcessingForm = () => {
         );
 
         const formData = new FormData();
-        formData.append('fileData', JSON.stringify({
-          url: file.preview,
-          metadata: file.metadata
-        }));
+        formData.append('file', file);
         formData.append('options', JSON.stringify(options));
 
         const response = await fetch('/api/process', {
@@ -340,15 +352,13 @@ const ImageProcessingForm = () => {
           body: formData,
         });
 
-        const data = await response.json();
-
         if (!response.ok) {
-          throw new Error(data.error || 'Processing failed');
+          throw new Error('Processing failed');
         }
 
+        const data = await response.json();
         const processingTime = Date.now() - startTime;
 
-        // Add to processed files
         const processedFile: ProcessedFile = {
           id: file.id,
           originalName: file.name,
@@ -356,25 +366,13 @@ const ImageProcessingForm = () => {
           originalUrl: file.preview,
           processedUrl: data.processedUrl,
           metadata: data.metadata,
-          processingOptions: options,
           processingTime,
           status: 'complete'
         };
 
         processed.push(processedFile);
-        setProcessedFiles(current => [...current, processedFile]);
-
-        // Update progress
+        setProcessedFiles((prev) => [...prev, processedFile]);
         setProgress(((i + 1) / totalFiles) * 100);
-
-        // Update file status
-        setFiles(current =>
-          current.map(f =>
-            f.id === file.id
-              ? { ...f, status: 'complete' }
-              : f
-          )
-        );
       }
 
       toast({
@@ -386,22 +384,23 @@ const ImageProcessingForm = () => {
       setActiveTab('results');
 
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Processing failed';
       console.error('Processing error:', error);
-      setUploadError(error instanceof Error ? error.message : 'Processing failed');
+      setUploadError(errorMessage);
       
       toast({
         variant: "destructive",
         title: "Processing Failed",
-        description: error instanceof Error ? error.message : 'Processing failed',
+        description: errorMessage,
         duration: 5000,
       });
     } finally {
       setProcessing(false);
     }
-  };
+  }, [files, options, toast]);
 
-  // Reset filters handler
-  const resetAdvancedFilters = () => {
+  // Reset Filters Handler
+  const resetAdvancedFilters = useCallback(() => {
     setOptions(prev => ({
       ...prev,
       advancedFilters: defaultProcessingOptions.advancedFilters
@@ -412,54 +411,45 @@ const ImageProcessingForm = () => {
       description: "Advanced filters have been reset to default values",
       duration: 3000,
     });
-  };
+  }, [toast]);
 
-  // Dropzone configuration
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop: useCallback(async (acceptedFiles: File[]) => {
-      if (files.length + acceptedFiles.length > MAX_FILES) {
-        toast({
-          variant: "destructive",
-          title: "Too Many Files",
-          description: `Maximum ${MAX_FILES} files allowed`,
-          duration: 5000,
-        });
-        return;
-      }
+  // Dropzone Handler
+  const onDrop = useCallback(async (acceptedFiles: File[]) => {
+    if (files.length + acceptedFiles.length > MAX_FILES) {
+      toast({
+        variant: "destructive",
+        title: "Too Many Files",
+        description: `Maximum ${MAX_FILES} files allowed`,
+        duration: 5000,
+      });
+      return;
+    }
 
+    const newFiles: FileWithPreview[] = acceptedFiles.map(file => ({
+      ...file,
+      preview: URL.createObjectURL(file),
+      id: generateUniqueId(),
+      status: 'uploading',
+      uploadProgress: 0
+    }));
+
+    setFiles(prev => [...prev, ...newFiles]);
+
+    for (const file of newFiles) {
       try {
-        const newFiles = acceptedFiles.map(file => ({
-          ...file,
-          preview: URL.createObjectURL(file),
-          id: generateUniqueId(),
-          status: 'uploading' as const,
-          uploadProgress: 0
-        }));
-
-        setFiles(prev => [...prev, ...newFiles]);
-
-        for (const file of newFiles) {
-          try {
-            await handleFileUpload(file);
-          } catch (error) {
-            console.error('Failed to upload file:', error);
-          }
-        }
+        await handleFileUpload(file);
       } catch (error) {
-        console.error('Drop handling error:', error);
-        toast({
-          variant: "destructive",
-          title: "Upload Error",
-          description: error instanceof Error ? error.message : 'Failed to process files',
-          duration: 5000,
-        });
+        console.error('Failed to upload file:', error);
       }
-    }, [files.length, handleFileUpload]),
+    }
+  }, [files.length, handleFileUpload, toast]);
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
     accept: ACCEPTED_TYPES,
     maxSize: MAX_FILE_SIZE,
     multiple: true
   });
-
 
   return (
     <div className="container mx-auto p-4 max-w-6xl">
@@ -500,12 +490,12 @@ const ImageProcessingForm = () => {
                 {/* Dropzone */}
                 <div
                   {...getRootProps()}
-                  className={`
-                    relative border-2 border-dashed rounded-lg p-8
-                    transition-all duration-200 ease-in-out
-                    ${isDragActive ? 'border-blue-500 bg-blue-50' : 'border-gray-300'}
-                    hover:border-blue-400 hover:bg-blue-50/50
-                  `}
+                  className={cn(
+                    "relative border-2 border-dashed rounded-lg p-8",
+                    "transition-all duration-200 ease-in-out",
+                    isDragActive ? "border-blue-500 bg-blue-50" : "border-gray-300",
+                    "hover:border-blue-400 hover:bg-blue-50/50"
+                  )}
                 >
                   <input {...getInputProps()} />
                   <div className="flex flex-col items-center space-y-4">
@@ -621,7 +611,9 @@ const ImageProcessingForm = () => {
                     <Label>Output Format</Label>
                     <Select
                       value={options.outputFormat}
-                      onValueChange={(value) => setOptions({ ...options, outputFormat: value })}
+                      onValueChange={(value: 'PNG' | 'JPG' | 'WebP') => 
+                        setOptions(prev => ({ ...prev, outputFormat: value }))
+                      }
                     >
                       <SelectTrigger>
                         <SelectValue />
@@ -641,7 +633,9 @@ const ImageProcessingForm = () => {
                       min={0}
                       max={100}
                       step={1}
-                      onValueChange={([value]) => setOptions({ ...options, quality: value })}
+                      onValueChange={([value]) => 
+                        setOptions(prev => ({ ...prev, quality: value }))
+                      }
                     />
                   </div>
                 </div>
@@ -653,7 +647,9 @@ const ImageProcessingForm = () => {
                     <Switch
                       id="resize"
                       checked={options.resize}
-                      onCheckedChange={(checked) => setOptions({ ...options, resize: checked })}
+                      onCheckedChange={(checked) => 
+                        setOptions(prev => ({ ...prev, resize: checked }))
+                      }
                     />
                   </div>
 
@@ -664,7 +660,12 @@ const ImageProcessingForm = () => {
                         <Input
                           type="number"
                           value={options.width}
-                          onChange={(e) => setOptions({ ...options, width: parseInt(e.target.value) })}
+                          onChange={(e) => 
+                            setOptions(prev => ({ 
+                              ...prev, 
+                              width: parseInt(e.target.value) || prev.width 
+                            }))
+                          }
                         />
                       </div>
                       <div className="space-y-2">
@@ -672,7 +673,12 @@ const ImageProcessingForm = () => {
                         <Input
                           type="number"
                           value={options.height}
-                          onChange={(e) => setOptions({ ...options, height: parseInt(e.target.value) })}
+                          onChange={(e) => 
+                            setOptions(prev => ({ 
+                              ...prev, 
+                              height: parseInt(e.target.value) || prev.height 
+                            }))
+                          }
                         />
                       </div>
                     </div>
@@ -683,7 +689,12 @@ const ImageProcessingForm = () => {
                     <Switch
                       id="aspectRatio"
                       checked={options.maintainAspectRatio}
-                      onCheckedChange={(checked) => setOptions({ ...options, maintainAspectRatio: checked })}
+                      onCheckedChange={(checked) => 
+                        setOptions(prev => ({ 
+                          ...prev, 
+                          maintainAspectRatio: checked 
+                        }))
+                      }
                     />
                   </div>
                 </div>
@@ -695,7 +706,12 @@ const ImageProcessingForm = () => {
                     <Switch
                       id="colorCorrection"
                       checked={options.colorCorrection}
-                      onCheckedChange={(checked) => setOptions({ ...options, colorCorrection: checked })}
+                      onCheckedChange={(checked) => 
+                        setOptions(prev => ({ 
+                          ...prev, 
+                          colorCorrection: checked 
+                        }))
+                      }
                     />
                   </div>
 
@@ -704,7 +720,12 @@ const ImageProcessingForm = () => {
                     <Switch
                       id="sharpen"
                       checked={options.sharpen}
-                      onCheckedChange={(checked) => setOptions({ ...options, sharpen: checked })}
+                      onCheckedChange={(checked) => 
+                        setOptions(prev => ({ 
+                          ...prev, 
+                          sharpen: checked 
+                        }))
+                      }
                     />
                   </div>
 
@@ -713,7 +734,12 @@ const ImageProcessingForm = () => {
                     <Switch
                       id="watermark"
                       checked={options.watermark}
-                      onCheckedChange={(checked) => setOptions({ ...options, watermark: checked })}
+                      onCheckedChange={(checked) => 
+                        setOptions(prev => ({ 
+                          ...prev, 
+                          watermark: checked 
+                        }))
+                      }
                     />
                   </div>
 
@@ -722,7 +748,12 @@ const ImageProcessingForm = () => {
                       <Label>Watermark Text</Label>
                       <Input
                         value={options.watermarkText}
-                        onChange={(e) => setOptions({ ...options, watermarkText: e.target.value })}
+                        onChange={(e) => 
+                          setOptions(prev => ({ 
+                            ...prev, 
+                            watermarkText: e.target.value 
+                          }))
+                        }
                         placeholder="Enter watermark text"
                       />
                     </div>
@@ -770,13 +801,15 @@ const ImageProcessingForm = () => {
                         min={-100}
                         max={100}
                         step={1}
-                        onValueChange={([value]) => setOptions(prev => ({
-                          ...prev,
-                          advancedFilters: {
-                            ...prev.advancedFilters,
-                            brightness: value
-                          }
-                        }))}
+                        onValueChange={([value]) => 
+                          setOptions(prev => ({
+                            ...prev,
+                            advancedFilters: {
+                              ...prev.advancedFilters,
+                              brightness: value
+                            }
+                          }))
+                        }
                       />
                     </div>
 
@@ -794,13 +827,15 @@ const ImageProcessingForm = () => {
                         min={-100}
                         max={100}
                         step={1}
-                        onValueChange={([value]) => setOptions(prev => ({
-                          ...prev,
-                          advancedFilters: {
-                            ...prev.advancedFilters,
-                            contrast: value
-                          }
-                        }))}
+                        onValueChange={([value]) => 
+                          setOptions(prev => ({
+                            ...prev,
+                            advancedFilters: {
+                              ...prev.advancedFilters,
+                              contrast: value
+                            }
+                          }))
+                        }
                       />
                     </div>
 
@@ -818,13 +853,15 @@ const ImageProcessingForm = () => {
                         min={-100}
                         max={100}
                         step={1}
-                        onValueChange={([value]) => setOptions(prev => ({
-                          ...prev,
-                          advancedFilters: {
-                            ...prev.advancedFilters,
-                            saturation: value
-                          }
-                        }))}
+                        onValueChange={([value]) => 
+                          setOptions(prev => ({
+                            ...prev,
+                            advancedFilters: {
+                              ...prev.advancedFilters,
+                              saturation: value
+                            }
+                          }))
+                        }
                       />
                     </div>
                   </div>
@@ -836,10 +873,12 @@ const ImageProcessingForm = () => {
                   <textarea
                     className="w-full min-h-[100px] rounded-md border border-gray-300 p-2"
                     value={options.processingNotes}
-                    onChange={(e) => setOptions(prev => ({
-                      ...prev,
-                      processingNotes: e.target.value
-                    }))}
+                    onChange={(e) => 
+                      setOptions(prev => ({
+                        ...prev,
+                        processingNotes: e.target.value
+                      }))
+                    }
                     placeholder="Add any special instructions or notes..."
                   />
                 </div>
@@ -879,7 +918,7 @@ const ImageProcessingForm = () => {
                     </motion.div>
                     <Progress value={progress} className="w-64 mt-4" />
                     <p className="mt-4 text-sm text-gray-500">
-                      Processing your images... {progress}%
+                      Processing your images... {Math.round(progress)}%
                     </p>
                   </div>
                 ) : processedFiles.length > 0 ? (
@@ -891,7 +930,7 @@ const ImageProcessingForm = () => {
                     <div className="grid grid-cols-2 gap-6">
                       {processedFiles.map((file, index) => (
                         <motion.div
-                          key={file.processed}
+                          key={file.id}
                           initial={{ opacity: 0, y: 20 }}
                           animate={{ opacity: 1, y: 0 }}
                           transition={{ delay: index * 0.1 }}
@@ -901,8 +940,8 @@ const ImageProcessingForm = () => {
                             <CardContent className="p-4">
                               <div className="relative aspect-video mb-4 overflow-hidden rounded-lg">
                                 <Image
-                                  src={file.url}
-                                  alt={`Processed version of ${file.original}`}
+                                  src={file.processedUrl}
+                                  alt={`Processed version of ${file.originalName}`}
                                   fill
                                   className="object-cover transition-transform group-hover:scale-105"
                                   sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
@@ -910,7 +949,7 @@ const ImageProcessingForm = () => {
                               </div>
                               <div className="space-y-2">
                                 <div className="flex items-center justify-between">
-                                  <p className="font-medium truncate">{file.original}</p>
+                                  <p className="font-medium truncate">{file.originalName}</p>
                                   <TooltipProvider>
                                     <Tooltip>
                                       <TooltipTrigger asChild>
@@ -919,8 +958,8 @@ const ImageProcessingForm = () => {
                                           size="sm"
                                           onClick={() => {
                                             const link = document.createElement('a');
-                                            link.href = file.url;
-                                            link.download = file.processed;
+                                            link.href = file.processedUrl;
+                                            link.download = file.processedName;
                                             document.body.appendChild(link);
                                             link.click();
                                             document.body.removeChild(link);
@@ -938,14 +977,9 @@ const ImageProcessingForm = () => {
                                 <div className="text-sm text-gray-500 space-y-1">
                                   <p>Size: {formatFileSize(file.metadata.size)}</p>
                                   <p>Dimensions: {file.metadata.width}x{file.metadata.height}px</p>
-                                  <p>Format: {file.metadata.format.toUpperCase()}</p>
+                                  <p>Format: {file.metadata.format}</p>
+                                  <p>Processing Time: {(file.processingTime / 1000).toFixed(2)}s</p>
                                 </div>
-                                {file.notes && (
-                                  <div className="mt-2 text-sm text-gray-600">
-                                    <p className="font-medium">Notes:</p>
-                                    <p>{file.notes}</p>
-                                  </div>
-                                )}
                               </div>
                             </CardContent>
                           </Card>
@@ -969,8 +1003,8 @@ const ImageProcessingForm = () => {
                         onClick={() => {
                           processedFiles.forEach(file => {
                             const link = document.createElement('a');
-                            link.href = file.url;
-                            link.download = file.processed;
+                            link.href = file.processedUrl;
+                            link.download = file.processedName;
                             document.body.appendChild(link);
                             link.click();
                             document.body.removeChild(link);
@@ -1001,7 +1035,7 @@ const ImageProcessingForm = () => {
             <AlertDialogTitle>Confirm Processing</AlertDialogTitle>
             <AlertDialogDescription>
               <div className="space-y-2">
-                <p>You are about to process {files.length} image(s) with the following settings:</p>
+                <p>You are about to process {files.length} image{files.length !== 1 ? 's' : ''} with the following settings:</p>
                 <ul className="list-disc pl-4 space-y-1">
                   <li>Output Format: {options.outputFormat}</li>
                   <li>Quality: {options.quality}%</li>
@@ -1013,7 +1047,7 @@ const ImageProcessingForm = () => {
                   )}
                   {options.colorCorrection && <li>Color Correction: Enabled</li>}
                   {options.sharpen && <li>Sharpening: Enabled</li>}
-                  {options.watermark && <li>Watermark: "{options.watermarkText}"</li>}
+                  {options.watermark && <li>Watermark: `{options.watermarkText}`</li>}
                   {Object.entries(options.advancedFilters).some(([_, value]) => value !== 0) && (
                     <li>
                       Advanced Filters: 
@@ -1024,7 +1058,7 @@ const ImageProcessingForm = () => {
                     </li>
                   )}
                   {options.processingNotes && (
-                    <li>Processing Notes: "{options.processingNotes}"</li>
+                    <li>Processing Notes: `{options.processingNotes}`</li>
                   )}
                 </ul>
               </div>
@@ -1058,7 +1092,7 @@ const ImageProcessingForm = () => {
                 <Check className="h-4 w-4 text-green-600" />
                 <AlertTitle>Success</AlertTitle>
                 <AlertDescription>
-                  {`${file.name} has been uploaded successfully`}
+                  {file.name} has been uploaded successfully
                 </AlertDescription>
               </Alert>
             </motion.div>
@@ -1089,6 +1123,7 @@ export type {
   FileWithPreview,
   ProcessedFile,
   ProcessingOptions,
+  ImageMetadata,
   FileErrorAlertProps,
 };
 
