@@ -42,4 +42,4 @@ public/processed/*
 
 # Uploaded images
 public/uploads/*
-!public/uploads/.gitkeep
+!public/uploads/.gitkeepnode_modules/

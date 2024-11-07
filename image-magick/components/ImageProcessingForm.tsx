@@ -53,7 +53,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
-import { Toast } from '@/components/ui/toast';
+import { useToast } from '@/components/ui/use-toast';
 import { cn } from '@/lib/utils';
 
 import type {
@@ -166,7 +166,7 @@ const ImageProcessingForm = () => {
   const [processedFiles, setProcessedFiles] = useState<ProcessedFile[]>([]);
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
   
-  const { toast } = Toast();
+  const { toast } = useToast();
   const abortControllerRef = useRef<AbortController | null>(null);
 
   // Cleanup function for file previews
