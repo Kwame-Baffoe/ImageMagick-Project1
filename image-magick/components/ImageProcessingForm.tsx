@@ -153,15 +153,17 @@ const formatFileSize = (bytes: number): string => {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
 };
 
-const createImageElement = (): HTMLImageElement => {
-  return document.createElement('img');
-};
+// const createImageElement = (): HTMLImageElement => {
+//   return document.createElement('img');
+// };
 
 
-const extractMetadata = async (file: File): Promise<ImageMetadata> => {
+const extractMetadata = async (file: File | Blob): Promise<ImageMetadata> => {
   return new Promise((resolve, reject) => {
-    const img = createImageElement();
-    const objectUrl = URL.createObjectURL(file);
+    const img = document.createElement('img');
+    const objectUrl = URL.createObjectURL(
+      file instanceof File ? file : new Blob([file], { type: file.type })
+    );
 
     img.onload = () => {
       URL.revokeObjectURL(objectUrl);
@@ -170,7 +172,7 @@ const extractMetadata = async (file: File): Promise<ImageMetadata> => {
         height: img.height,
         size: file.size,
         format: file.type.split('/')[1].toUpperCase(),
-        lastModified: new Date(file.lastModified)
+        lastModified: file instanceof File ? new Date(file.lastModified) : new Date()
       });
     };
 
