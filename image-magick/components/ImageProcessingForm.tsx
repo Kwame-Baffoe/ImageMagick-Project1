@@ -1,7 +1,6 @@
-// components/ImageProcessingForm.tsx
 'use client';
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import Image from 'next/image';
 import { 
@@ -14,7 +13,8 @@ import {
   RefreshCw,
   Filter,
   Settings,
-  Image as ImageIcon
+  Image as ImageIcon,
+  Info
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -53,55 +53,15 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import { Toast } from '@/components/ui/toast';
+import { cn } from '@/lib/utils';
 
-// Types
-interface FileWithPreview extends File {
-  preview: string;
-  uploadProgress?: number;
-  status?: 'uploading' | 'complete' | 'error';
-  error?: string;
-  id: string;
-}
-
-interface ProcessedFile {
-  original: string;
-  processed: string;
-  url: string;
-  metadata: {
-    size: number;
-    width: number;
-    height: number;
-    format: string;
-  };
-  notes?: string;
-  status?: 'downloaded';
-}
-
-interface ProcessingOptions {
-  inputFormat: string;
-  outputFormat: string;
-  quality: number;
-  resize: boolean;
-  width: number;
-  height: number;
-  maintainAspectRatio: boolean;
-  colorCorrection: boolean;
-  sharpen: boolean;
-  watermark: boolean;
-  watermarkText: string;
-  advancedFilters: {
-    brightness: number;
-    contrast: number;
-    saturation: number;
-  };
-  processingNotes: string;
-}
-
-interface FileErrorAlertProps {
-  filename: string;
-  onRetry: () => Promise<void>;
-  onRemove: () => void;
-}
+import type {
+  FileWithPreview,
+  ProcessedFile,
+  ProcessingOptions,
+  ImageMetadata,
+} from '@/types';
 
 // Constants
 const ACCEPTED_TYPES = {
@@ -111,6 +71,7 @@ const ACCEPTED_TYPES = {
 };
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+const MAX_FILES = 10;
 
 const defaultProcessingOptions: ProcessingOptions = {
   inputFormat: 'JPG',
@@ -132,7 +93,49 @@ const defaultProcessingOptions: ProcessingOptions = {
   processingNotes: '',
 };
 
-// Error Alert Component
+// Utility Functions
+const generateUniqueId = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+const formatFileSize = (bytes: number): string => {
+  if (bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
+};
+
+const extractMetadata = async (file: File): Promise<ImageMetadata> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(file);
+
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve({
+        width: img.width,
+        height: img.height,
+        size: file.size,
+        format: file.type.split('/')[1].toUpperCase(),
+        lastModified: new Date(file.lastModified)
+      });
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('Failed to load image metadata'));
+    };
+
+    img.src = objectUrl;
+  });
+};
+
+// File Error Alert Component
+interface FileErrorAlertProps {
+  filename: string;
+  onRetry: () => Promise<void>;
+  onRemove: () => void;
+}
+
 const FileErrorAlert: React.FC<FileErrorAlertProps> = ({ filename, onRetry, onRemove }) => (
   <Alert variant="destructive" className="mt-2">
     <AlertCircle className="h-4 w-4" />
@@ -151,19 +154,9 @@ const FileErrorAlert: React.FC<FileErrorAlertProps> = ({ filename, onRetry, onRe
   </Alert>
 );
 
-// Utility Functions
-const generateUniqueId = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-const formatFileSize = (bytes: number): string => {
-  if (bytes === 0) return '0 Bytes';
-  const k = 1024;
-  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
-};
-
 // Main Component
 const ImageProcessingForm = () => {
+  // State management
   const [activeTab, setActiveTab] = useState('upload');
   const [files, setFiles] = useState<FileWithPreview[]>([]);
   const [options, setOptions] = useState<ProcessingOptions>(defaultProcessingOptions);
@@ -172,6 +165,9 @@ const ImageProcessingForm = () => {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [processedFiles, setProcessedFiles] = useState<ProcessedFile[]>([]);
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+  
+  const { toast } = Toast();
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // Cleanup function for file previews
   useEffect(() => {
@@ -181,37 +177,14 @@ const ImageProcessingForm = () => {
           URL.revokeObjectURL(file.preview);
         }
       });
+      // Cleanup any ongoing requests
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
     };
   }, [files]);
 
-  // Extract metadata utility
-  const extractMetadata = async (file: File) => {
-    return new Promise<{
-      width: number;
-      height: number;
-      size: number;
-      format: string;
-      lastModified: Date;
-    }>((resolve) => {
-      const img = new Image();
-      const objectUrl = URL.createObjectURL(file);
-
-      img.onload = () => {
-        URL.revokeObjectURL(objectUrl);
-        resolve({
-          width: img.width,
-          height: img.height,
-          size: file.size,
-          format: file.type.split('/')[1].toUpperCase(),
-          lastModified: new Date(file.lastModified)
-        });
-      };
-
-      img.src = objectUrl;
-    });
-  };
-
-  // File upload handler
+  // File upload handler with progress tracking
   const handleFileUpload = async (file: FileWithPreview): Promise<void> => {
     try {
       if (!file) {
@@ -221,68 +194,84 @@ const ImageProcessingForm = () => {
       const formData = new FormData();
       formData.append('file', file);
 
+      // Get metadata before upload
+      const metadata = await extractMetadata(file);
+      formData.append('metadata', JSON.stringify(metadata));
+
       // Update file status to uploading
       setFiles(current =>
         current.map(f =>
           f.id === file.id
-            ? { ...f, status: 'uploading', uploadProgress: 0 }
+            ? { ...f, status: 'uploading', uploadProgress: 0, metadata }
             : f
         )
       );
 
-      let progressInterval: NodeJS.Timeout;
+      // Create new AbortController for this upload
+      abortControllerRef.current = new AbortController();
+
+      const xhr = new XMLHttpRequest();
       
-      try {
-        progressInterval = setInterval(() => {
-          setFiles(current =>
-            current.map(f =>
-              f.id === file.id && f.status === 'uploading'
-                ? { 
-                    ...f, 
-                    uploadProgress: Math.min((f.uploadProgress || 0) + 10, 90)
-                  }
-                : f
-            )
-          );
-        }, 200);
-
-        const response = await fetch('/api/upload', {
-          method: 'POST',
-          body: formData,
-        });
-
-        clearInterval(progressInterval);
-
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.error || 'Upload failed');
-        }
-
-        const data = await response.json();
-
-        if (data.success) {
+      // Track upload progress
+      xhr.upload.addEventListener('progress', (event) => {
+        if (event.lengthComputable) {
+          const progress = Math.round((event.loaded / event.total) * 100);
           setFiles(current =>
             current.map(f =>
               f.id === file.id
-                ? { 
-                    ...f, 
-                    uploadProgress: 100, 
-                    status: 'complete',
-                    preview: `/uploads/${data.filename}`
-                  }
+                ? { ...f, uploadProgress: progress }
                 : f
             )
           );
-          setUploadError(null);
-        } else {
-          throw new Error(data.error || 'Upload failed');
         }
-      } catch (error) {
-        if (progressInterval) {
-          clearInterval(progressInterval);
-        }
-        throw error;
+      });
+
+      // Wrap XHR in a promise
+      const response = await new Promise<any>((resolve, reject) => {
+        xhr.open('POST', '/api/upload');
+        
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              resolve(JSON.parse(xhr.responseText));
+            } catch (e) {
+              reject(new Error('Invalid response format'));
+            }
+          } else {
+            reject(new Error(xhr.statusText || 'Upload failed'));
+          }
+        };
+        
+        xhr.onerror = () => reject(new Error('Network error'));
+        xhr.onabort = () => reject(new Error('Upload cancelled'));
+        
+        xhr.send(formData);
+      });
+
+      if (response.success) {
+        setFiles(current =>
+          current.map(f =>
+            f.id === file.id
+              ? { 
+                  ...f, 
+                  uploadProgress: 100, 
+                  status: 'complete',
+                  preview: `/uploads/${response.filename}`,
+                  metadata: response.metadata || metadata
+                }
+              : f
+          )
+        );
+        
+        toast({
+          title: "Upload Successful",
+          description: `${file.name} has been uploaded successfully`,
+          duration: 3000,
+        });
+      } else {
+        throw new Error(response.error || 'Upload failed');
       }
+
     } catch (error) {
       console.error('Upload error:', error);
       setFiles(current =>
@@ -296,7 +285,14 @@ const ImageProcessingForm = () => {
             : f
         )
       );
-      setUploadError(error instanceof Error ? error.message : 'Upload failed');
+      
+      toast({
+        variant: "destructive",
+        title: "Upload Failed",
+        description: error instanceof Error ? error.message : 'Upload failed',
+        duration: 5000,
+      });
+      
       throw error;
     }
   };
@@ -316,34 +312,91 @@ const ImageProcessingForm = () => {
     setUploadError(null);
     
     try {
-      // Simulate processing stages
-      const stages = ['Preparing', 'Processing', 'Optimizing', 'Finalizing'];
-      for (const stage of stages) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        setProgress(prev => prev + 25);
+      const totalFiles = files.length;
+      const processed: ProcessedFile[] = [];
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const startTime = Date.now();
+
+        // Update processing status
+        setFiles(current =>
+          current.map(f =>
+            f.id === file.id
+              ? { ...f, status: 'processing' }
+              : f
+          )
+        );
+
+        const formData = new FormData();
+        formData.append('fileData', JSON.stringify({
+          url: file.preview,
+          metadata: file.metadata
+        }));
+        formData.append('options', JSON.stringify(options));
+
+        const response = await fetch('/api/process', {
+          method: 'POST',
+          body: formData,
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || 'Processing failed');
+        }
+
+        const processingTime = Date.now() - startTime;
+
+        // Add to processed files
+        const processedFile: ProcessedFile = {
+          id: file.id,
+          originalName: file.name,
+          processedName: data.processedUrl.split('/').pop()!,
+          originalUrl: file.preview,
+          processedUrl: data.processedUrl,
+          metadata: data.metadata,
+          processingOptions: options,
+          processingTime,
+          status: 'complete'
+        };
+
+        processed.push(processedFile);
+        setProcessedFiles(current => [...current, processedFile]);
+
+        // Update progress
+        setProgress(((i + 1) / totalFiles) * 100);
+
+        // Update file status
+        setFiles(current =>
+          current.map(f =>
+            f.id === file.id
+              ? { ...f, status: 'complete' }
+              : f
+          )
+        );
       }
 
-      // Simulate processed files
-      const mockProcessedFiles: ProcessedFile[] = files.map(file => ({
-        original: file.name,
-        processed: `processed_${file.name}`,
-        url: file.preview,
-        metadata: {
-          size: file.size,
-          width: 1920,
-          height: 1080,
-          format: options.outputFormat.toLowerCase()
-        },
-        notes: options.processingNotes
-      }));
+      toast({
+        title: "Processing Complete",
+        description: `Successfully processed ${totalFiles} image${totalFiles > 1 ? 's' : ''}`,
+        duration: 5000,
+      });
 
-      setProcessedFiles(mockProcessedFiles);
       setActiveTab('results');
+
     } catch (error) {
+      console.error('Processing error:', error);
       setUploadError(error instanceof Error ? error.message : 'Processing failed');
+      
+      toast({
+        variant: "destructive",
+        title: "Processing Failed",
+        description: error instanceof Error ? error.message : 'Processing failed',
+        duration: 5000,
+      });
     } finally {
       setProcessing(false);
-      setProgress(0);
     }
   };
 
@@ -353,33 +406,60 @@ const ImageProcessingForm = () => {
       ...prev,
       advancedFilters: defaultProcessingOptions.advancedFilters
     }));
+    
+    toast({
+      title: "Filters Reset",
+      description: "Advanced filters have been reset to default values",
+      duration: 3000,
+    });
   };
 
   // Dropzone configuration
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop: useCallback(async (acceptedFiles: File[]) => {
-      const newFiles = acceptedFiles.map(file => ({
-        ...file,
-        preview: URL.createObjectURL(file),
-        id: generateUniqueId(),
-        status: 'uploading' as const,
-        uploadProgress: 0
-      }));
-
-      setFiles(prev => [...prev, ...newFiles]);
-
-      for (const file of newFiles) {
-        try {
-          await handleFileUpload(file);
-        } catch (error) {
-          console.error('Upload error:', error);
-        }
+      if (files.length + acceptedFiles.length > MAX_FILES) {
+        toast({
+          variant: "destructive",
+          title: "Too Many Files",
+          description: `Maximum ${MAX_FILES} files allowed`,
+          duration: 5000,
+        });
+        return;
       }
-    }, []),
+
+      try {
+        const newFiles = acceptedFiles.map(file => ({
+          ...file,
+          preview: URL.createObjectURL(file),
+          id: generateUniqueId(),
+          status: 'uploading' as const,
+          uploadProgress: 0
+        }));
+
+        setFiles(prev => [...prev, ...newFiles]);
+
+        for (const file of newFiles) {
+          try {
+            await handleFileUpload(file);
+          } catch (error) {
+            console.error('Failed to upload file:', error);
+          }
+        }
+      } catch (error) {
+        console.error('Drop handling error:', error);
+        toast({
+          variant: "destructive",
+          title: "Upload Error",
+          description: error instanceof Error ? error.message : 'Failed to process files',
+          duration: 5000,
+        });
+      }
+    }, [files.length, handleFileUpload]),
     accept: ACCEPTED_TYPES,
     maxSize: MAX_FILE_SIZE,
     multiple: true
   });
+
 
   return (
     <div className="container mx-auto p-4 max-w-6xl">

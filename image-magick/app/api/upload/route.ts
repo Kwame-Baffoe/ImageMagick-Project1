@@ -1,6 +1,8 @@
 // src/app/api/upload/route.ts
-import { NextRequest, NextResponse } from 'next/server';
-import { writeFile, mkdir, stat } from 'fs/promises';
+
+import { NextRequest } from 'next/server';
+import { NextResponse } from 'next/server';
+import { writeFile, mkdir, stat, readdir, unlink } from 'fs/promises';
 import path from 'path';
 import { existsSync } from 'fs';
 
@@ -21,10 +23,66 @@ interface UploadResponse {
   details?: string;
 }
 
+interface UploadError extends Error {
+  code: string;
+  statusCode: number;
+}
+
+// Custom error class
+class FileUploadError extends Error implements UploadError {
+  code: string;
+  statusCode: number;
+
+  constructor(message: string, code: string, statusCode: number) {
+    super(message);
+    this.code = code;
+    this.statusCode = statusCode;
+    this.name = 'FileUploadError';
+  }
+}
+
+// CORS headers
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+};
+
+// Security headers
+const securityHeaders = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Content-Security-Policy': "default-src 'self'",
+  'X-XSS-Protection': '1; mode=block'
+};
+
 // Utility functions
-const validateFileType = (file: File): boolean => {
-  const extension = path.extname(file.name).toLowerCase();
-  return ALLOWED_TYPES.has(file.type) && ALLOWED_EXTENSIONS.has(extension);
+const validateFileType = async (file: File): Promise<boolean> => {
+  try {
+    const extension = path.extname(file.name).toLowerCase();
+    if (!ALLOWED_TYPES.has(file.type) || !ALLOWED_EXTENSIONS.has(extension)) {
+      return false;
+    }
+
+    // Check file signature (magic numbers)
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const fileSignature = Array.from(buffer.slice(0, 4));
+
+    const signatures = {
+      jpeg: [0xFF, 0xD8, 0xFF],
+      png: [0x89, 0x50, 0x4E, 0x47],
+      webp: [0x52, 0x49, 0x46, 0x46]
+    };
+
+    return (
+      fileSignature.slice(0, 3).every((byte, i) => byte === signatures.jpeg[i]) ||
+      fileSignature.every((byte, i) => byte === signatures.png[i]) ||
+      fileSignature.slice(0, 4).every((byte, i) => byte === signatures.webp[i])
+    );
+  } catch (error) {
+    console.error('File validation error:', error);
+    return false;
+  }
 };
 
 const ensureUploadDirectory = async (): Promise<void> => {
@@ -39,7 +97,7 @@ const generateSafeFilename = (originalName: string): string => {
     .replace(/[^a-zA-Z0-9]/g, '-')
     .toLowerCase();
   const uniqueId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  return `${uniqueId}-${baseFilename}${extension}`;
+  return `${baseFilename}-${uniqueId}${extension}`;
 };
 
 const getFileStats = async (filepath: string) => {
@@ -51,9 +109,60 @@ const getFileStats = async (filepath: string) => {
   }
 };
 
+const cleanupOldFiles = async () => {
+  try {
+    const MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
+    const files = await readdir(UPLOAD_DIR);
+    const now = Date.now();
+
+    for (const file of files) {
+      const filePath = path.join(UPLOAD_DIR, file);
+      const stats = await stat(filePath);
+
+      if (now - stats.mtimeMs > MAX_AGE) {
+        await unlink(filePath);
+      }
+    }
+  } catch (error) {
+    console.error('Cleanup error:', error);
+  }
+};
+
+// Rate limiting (simple in-memory implementation)
+const rateLimit = new Map<string, { count: number; resetTime: number }>();
+
+const checkRateLimit = (ip: string): boolean => {
+  const WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+  const MAX_REQUESTS = 100;
+  const now = Date.now();
+
+  const userLimit = rateLimit.get(ip) || { count: 0, resetTime: now + WINDOW_MS };
+
+  if (now > userLimit.resetTime) {
+    userLimit.count = 1;
+    userLimit.resetTime = now + WINDOW_MS;
+  } else if (userLimit.count >= MAX_REQUESTS) {
+    return false;
+  } else {
+    userLimit.count++;
+  }
+
+  rateLimit.set(ip, userLimit);
+  return true;
+};
+
 // Main upload handler
 export async function POST(req: NextRequest): Promise<NextResponse<UploadResponse>> {
   try {
+    // Check rate limit
+    const ip = req.headers.get('x-forwarded-for') || 'unknown';
+    if (!checkRateLimit(ip)) {
+      return NextResponse.json({
+        success: false,
+        error: 'Rate limit exceeded'
+      }, { status: 429 });
+    }
+
     // Ensure upload directory exists
     await ensureUploadDirectory();
 
@@ -62,26 +171,29 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
 
     // Validate file exists and is a File object
     if (!file || !(file instanceof File)) {
-      return NextResponse.json({
-        success: false,
-        error: 'No file provided or invalid file format'
-      }, { status: 400 });
+      throw new FileUploadError(
+        'No file provided or invalid file format',
+        'INVALID_FILE',
+        400
+      );
     }
 
     // Validate file size
     if (file.size > MAX_FILE_SIZE) {
-      return NextResponse.json({
-        success: false,
-        error: `File size exceeds maximum limit of ${MAX_FILE_SIZE / 1024 / 1024}MB`
-      }, { status: 400 });
+      throw new FileUploadError(
+        `File size exceeds maximum limit of ${MAX_FILE_SIZE / 1024 / 1024}MB`,
+        'FILE_TOO_LARGE',
+        400
+      );
     }
 
     // Validate file type
-    if (!validateFileType(file)) {
-      return NextResponse.json({
-        success: false,
-        error: 'Invalid file type. Only JPEG, PNG, and WebP files are allowed.'
-      }, { status: 400 });
+    if (!(await validateFileType(file))) {
+      throw new FileUploadError(
+        'Invalid file type. Only JPEG, PNG, and WebP files are allowed.',
+        'INVALID_FILE_TYPE',
+        400
+      );
     }
 
     // Generate safe filename and filepath
@@ -96,11 +208,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
     // Verify file was written successfully
     const stats = await getFileStats(filepath);
     if (!stats) {
-      throw new Error('File failed to write to disk');
+      throw new FileUploadError(
+        'File failed to write to disk',
+        'WRITE_ERROR',
+        500
+      );
     }
 
-    // Return success response
-    return NextResponse.json({
+    // Cleanup old files
+    await cleanupOldFiles();
+
+    // Create response with all headers
+    const response = NextResponse.json({
       success: true,
       filename,
       url: `/uploads/${filename}`,
@@ -108,35 +227,44 @@ export async function POST(req: NextRequest): Promise<NextResponse<UploadRespons
       type: file.type
     });
 
+    // Add security and CORS headers
+    Object.entries({ ...corsHeaders, ...securityHeaders }).forEach(([key, value]) => {
+      response.headers.set(key, value);
+    });
+
+    return response;
+
   } catch (error) {
     console.error('Upload error:', error);
-    return NextResponse.json({
+
+    const statusCode = error instanceof FileUploadError ? error.statusCode : 500;
+    const errorResponse = {
       success: false,
-      error: 'Upload failed',
-      details: error instanceof Error ? error.message : 'Unknown error'
-    }, { status: 500 });
+      error: error instanceof Error ? error.message : 'Upload failed',
+      code: error instanceof FileUploadError ? error.code : 'UNKNOWN_ERROR',
+    };
+
+    const response = NextResponse.json(errorResponse, { status: statusCode });
+    
+    // Add headers even to error responses
+    Object.entries({ ...corsHeaders, ...securityHeaders }).forEach(([key, value]) => {
+      response.headers.set(key, value);
+    });
+
+    return response;
   }
 }
 
-// CORS handler
-export async function OPTIONS(): Promise<NextResponse> {
+// CORS preflight handler
+export async function OPTIONS(req: NextRequest) {
   return new NextResponse(null, {
     status: 204,
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-      'Access-Control-Max-Age': '86400',
-    },
+    headers: corsHeaders,
   });
 }
 
-// API configuration
 export const config = {
   api: {
-    bodyParser: {
-      sizeLimit: '10mb',
-    },
-    responseLimit: '10mb',
+    bodyParser: false, // Let Next.js handle body parsing
   },
 };
